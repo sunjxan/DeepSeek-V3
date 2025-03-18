@@ -2,7 +2,7 @@ import math
 from typing import Tuple, Optional, Literal
 
 import torch
-from torch import nn
+import torch.nn as nn
 import torch.nn.functional as F
 
 class ModelArgs:
@@ -40,12 +40,12 @@ class ModelArgs:
         mscale (float): Scaling factor for extended attention.
     """
     max_batch_size: int = 8
-    max_seq_len: int = 4096 * 4
-    dtype: Literal["bf16", "fp8"] = "bf16"
+    max_seq_len: int = 1024 * 4
+    # dtype: Literal["bf16", "fp8"] = "bf16"
     vocab_size: int = 10240
     dim: int = 200
     inter_dim: int = 300
-    moe_inter_dim: int = 1408
+    moe_inter_dim: int = 250
     n_layers: int = 6
     n_dense_layers: int = 1
     n_heads: int = 16
@@ -55,7 +55,7 @@ class ModelArgs:
     n_activated_experts: int = 6
     n_expert_groups: int = 1
     n_limited_groups: int = 1
-    score_func: Literal["softmax", "sigmoid"] = "softmax"
+    # score_func: Literal["softmax", "sigmoid"] = "softmax"
     route_scale: float = 1.
     # mla
     q_lora_rank: int = 0
@@ -70,7 +70,6 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.
-
 
 def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
     """
@@ -152,7 +151,6 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
     return freqs_cis
 
-
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """
     Applies rotary positional embeddings to the input tensor.
@@ -169,7 +167,6 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
     y = torch.view_as_real(x * freqs_cis).flatten(3)
     return y.to(dtype)
-
 
 class MLA(nn.Module):
     """
@@ -257,7 +254,6 @@ class MLA(nn.Module):
         x = self.wo(x.flatten(2))
         return x
 
-
 class MLP(nn.Module):
     """
     Multi-Layer Perceptron (MLP) used as a feed-forward layer.
@@ -292,7 +288,6 @@ class MLP(nn.Module):
         """
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
-
 class Gate(nn.Module):
     """
     Gating mechanism for routing inputs in a mixture-of-experts (MoE) model.
@@ -319,7 +314,6 @@ class Gate(nn.Module):
         self.topk = args.n_activated_experts
         self.n_groups = args.n_expert_groups
         self.topk_groups = args.n_limited_groups
-        self.score_func = args.score_func
         self.route_scale = args.route_scale
         self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
         self.bias = nn.Parameter(torch.empty(args.n_routed_experts)) if self.dim == 7168 else None
@@ -335,10 +329,7 @@ class Gate(nn.Module):
             Tuple[torch.Tensor, torch.Tensor]: Routing weights and selected expert indices.
         """
         scores = F.linear(x, self.weight)
-        if self.score_func == "softmax":
-            scores = scores.softmax(dim=-1, dtype=torch.float32)
-        else:
-            scores = scores.sigmoid()
+        scores = scores.softmax(dim=-1, dtype=torch.float32)
         original_scores = scores
         if self.bias is not None:
             scores = scores + self.bias
@@ -353,11 +344,8 @@ class Gate(nn.Module):
             scores = scores.masked_fill_(mask.unsqueeze(-1), float("-inf")).flatten(1)
         indices = torch.topk(scores, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
-        if self.score_func == "sigmoid":
-            weights /= weights.sum(dim=-1, keepdim=True)
         weights *= self.route_scale
         return weights.type_as(x), indices
-
 
 class MoE(nn.Module):
     """
@@ -415,7 +403,6 @@ class MoE(nn.Module):
         z = self.shared_experts(x)
         return (y + z).view(shape)
 
-
 class Block(nn.Module):
     """
     Transformer block combining attention and feed-forward layers.
@@ -456,7 +443,6 @@ class Block(nn.Module):
         x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
         x = x + self.ffn(self.ffn_norm(x))
         return x
-
 
 class Transformer(nn.Module):
     """
@@ -511,9 +497,8 @@ class Transformer(nn.Module):
         logits = self.head(h)
         return logits
 
-
 if __name__ == "__main__":
-    torch.set_default_dtype(torch.bfloat16)
+    # torch.set_default_dtype(torch.bfloat16)
     # torch.set_default_device("cuda")
     torch.manual_seed(0)
     args = ModelArgs()
