@@ -1,5 +1,5 @@
 import math
-from typing import Tuple, Optional, Literal
+from typing import Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -185,7 +185,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     参数:
         x (torch.Tensor): 输入张量，形状为(..., head_dim)
         freqs_cis (torch.Tensor): 预计算的复数频率矩阵
-        
+    
     返回:
         torch.Tensor: 旋转后的张量，保持原始形状
     """

@@ -1,10 +1,8 @@
-import os
 import json
 from argparse import ArgumentParser
 from typing import List
 
 import torch
-import torch.distributed as dist
 from transformers import AutoTokenizer
 from safetensors.torch import load_model
 
@@ -26,14 +24,14 @@ def sample(logits, temperature: float = 1.0):
     probs = torch.softmax(logits, dim=-1)
     return probs.div_(torch.empty_like(probs).exponential_(1)).argmax(dim=-1)
 
-
 @torch.inference_mode()
 def generate(
     model: Transformer,
     prompt_tokens: List[List[int]],
     max_new_tokens: int,
     eos_id: int,
-    temperature: float = 1.0
+    temperature: float = 1.0,
+    device: str = 'cpu'
 ) -> List[List[int]]:
     """
     Generates new tokens based on the given prompt tokens using the specified model.
@@ -51,14 +49,14 @@ def generate(
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
     total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
-    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda")
+    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device=device)
     for i, t in enumerate(prompt_tokens):
-        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device=device)
     prev_pos = 0
-    finished = torch.tensor([False] * len(prompt_tokens), device="cuda")
+    finished = torch.tensor([False] * len(prompt_tokens), device=device)
     prompt_mask = tokens != -1
     for cur_pos in range(min(prompt_lens), total_len):
-        logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+        logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)[:, -1]
         if temperature > 0:
             next_token = sample(logits, temperature)
         else:
@@ -76,7 +74,6 @@ def generate(
             toks = toks[:toks.index(eos_id)]
         completion_tokens.append(toks)
     return completion_tokens
-
 
 def main(
     ckpt_path: str,
@@ -97,40 +94,24 @@ def main(
         max_new_tokens (int, optional): Maximum number of new tokens to generate. Defaults to 100.
         temperature (float, optional): Temperature for sampling. Defaults to 1.0.
     """
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
-    rank = int(os.getenv("RANK", "0"))
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    if world_size > 1:
-        dist.init_process_group("nccl")
-    global print
-    if rank != 0:
-        print = lambda *_, **__: None
-    torch.cuda.set_device(local_rank)
-    torch.set_default_dtype(torch.bfloat16)
-    torch.set_num_threads(8)
+    # torch.cuda.set_device(local_rank)
+    # torch.set_default_dtype(torch.bfloat16)
+    # torch.set_num_threads(8)
     torch.manual_seed(965)
-    with open(config) as f:
-        args = ModelArgs(**json.load(f))
-    print(args)
-    with torch.device("cuda"):
-        model = Transformer(args)
-    tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
+    # with open(config, 'r') as f:
+    #     args = ModelArgs(**json.load(f))
+    # print(args)
+    args = ModelArgs()
+    model = Transformer(args)
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
+    # tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
     tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
-    load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+    # load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
 
     if interactive:
         messages = []
         while True:
-            if world_size == 1:
-                prompt = input(">>> ")
-            elif rank == 0:
-                prompt = input(">>> ")
-                objects = [prompt]
-                dist.broadcast_object_list(objects, 0)
-            else:
-                objects = [None]
-                dist.broadcast_object_list(objects, 0)
-                prompt = objects[0]
+            prompt = input(">>> ")
             if prompt == "/exit":
                 break
             elif prompt == "/clear":
@@ -154,9 +135,6 @@ def main(
             print("Completion:", completion)
             print()
 
-    if world_size > 1:
-        dist.destroy_process_group()
-
 
 if __name__ == "__main__":
     """
@@ -174,8 +152,8 @@ if __name__ == "__main__":
         AssertionError: If neither input-file nor interactive mode is specified.
     """
     parser = ArgumentParser()
-    parser.add_argument("--ckpt-path", type=str, required=True)
-    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--ckpt-path", type=str, default="")
+    parser.add_argument("--config", type=str, default="")
     parser.add_argument("--input-file", type=str, default="")
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=200)
