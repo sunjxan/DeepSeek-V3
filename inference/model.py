@@ -3,7 +3,6 @@ from typing import Tuple, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 class ModelArgs:
     """
@@ -223,7 +222,6 @@ class MLA(nn.Module):
         super().__init__()
         self.dim = args.dim
         self.n_heads = args.n_heads        # 总头数
-        self.n_local_heads = args.n_heads  # 本地头数（分布式场景使用）
         
         # LoRA配置
         self.q_lora_rank = args.q_lora_rank
@@ -260,10 +258,10 @@ class MLA(nn.Module):
 
         # 注册KV缓存（非持久化缓冲区）
         self.register_buffer("k_cache", torch.zeros(
-            args.max_batch_size, args.max_seq_len, self.n_local_heads, self.qk_head_dim
+            args.max_batch_size, args.max_seq_len, self.n_heads, self.qk_head_dim
         ), persistent=False)
         self.register_buffer("v_cache", torch.zeros(
-            args.max_batch_size, args.max_seq_len, self.n_local_heads, self.v_head_dim
+            args.max_batch_size, args.max_seq_len, self.n_heads, self.v_head_dim
         ), persistent=False)
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
@@ -295,7 +293,7 @@ class MLA(nn.Module):
             q = self.wq(x)  # (bsz, seqlen, n_heads*qk_head_dim)
         else:
             q = self.wq_b(self.q_norm(self.wq_a(x)))
-        q = q.view(bsz, seqlen, self.n_local_heads, self.qk_head_dim)
+        q = q.view(bsz, seqlen, self.n_heads, self.qk_head_dim)
         
         # 分解Q为无位置编码和有位置编码部分
         q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -311,11 +309,11 @@ class MLA(nn.Module):
         
         # 处理键值投影
         kv = self.wkv_b(self.kv_norm(kv))
-        kv = kv.view(bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+        kv = kv.view(bsz, seqlen, self.n_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         
         # 合并K的两个部分并扩展头维度
-        k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
+        k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1)
         
         # 更新KV缓存
         self.k_cache[:bsz, start_pos:end_pos] = k
@@ -362,6 +360,7 @@ class MLP(nn.Module):
         self.w2 = nn.Linear(inter_dim, dim)
         # 并行线性变换层：dim -> inter_dim（用于门控计算）
         self.w3 = nn.Linear(dim, inter_dim)
+        self.activation = nn.SiLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -376,7 +375,7 @@ class MLP(nn.Module):
         返回:
             输出张量，形状与输入相同
         """
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return self.w2(self.activation(self.w1(x)) * self.w3(x))
 
 class Gate(nn.Module):
     """
@@ -425,7 +424,7 @@ class Gate(nn.Module):
             (weights, indices): 路由权重和专家索引
         """
         # 计算原始路由分数 [batch_size, n_experts]
-        scores = F.linear(x, self.weight)
+        scores = torch.matmul(x, self.weight.transpose(-2, -1))
         scores = scores.softmax(dim=-1, dtype=torch.float32)  # 标准化为概率分布
         original_scores = scores  # 保存原始分数用于后续计算
         
@@ -483,20 +482,14 @@ class MoE(nn.Module):
         super().__init__()
         self.dim = args.dim
         self.n_routed_experts = args.n_routed_experts  # 总专家数量
-        self.n_local_experts = args.n_routed_experts  # 本地专家数量
         self.n_activated_experts = args.n_activated_experts  # 激活的专家数
-        
-        # 专家索引范围（用于分布式训练）
-        self.experts_start_idx = 0
-        self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         
         # 初始化门控模块
         self.gate = Gate(args)
         
         # 初始化专家列表（使用MLP作为专家网络）
         self.experts = nn.ModuleList([
-            MLP(args.dim, args.moe_inter_dim) if self.experts_start_idx <= i < self.experts_end_idx else None
-            for i in range(self.n_routed_experts)
+            MLP(args.dim, args.moe_inter_dim) for i in range(self.n_routed_experts)
         ])
         
         # 共享专家处理所有输入
@@ -528,7 +521,7 @@ class MoE(nn.Module):
         counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
         
         # 遍历本地专家进行计算
-        for i in range(self.experts_start_idx, self.experts_end_idx):
+        for i in range(self.n_routed_experts):
             if counts[i] == 0:  # 跳过未被选中的专家
                 continue
                 
