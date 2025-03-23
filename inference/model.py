@@ -1,9 +1,11 @@
 import math
 from typing import Tuple, Optional
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
+@dataclass
 class ModelArgs:
     """
     模型参数配置类，用于定义模型超参数和结构参数

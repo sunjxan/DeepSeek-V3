@@ -141,21 +141,22 @@ def main(
     # 设置随机种子（保证可重复性）
     torch.manual_seed(965)
     
+    tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V3")
+    
     # 初始化模型参数（示例代码，实际需要从配置文件加载）
     # with open(config, 'r') as f:
     #     args = ModelArgs(**json.load(f))
     # print(args)
-    args = ModelArgs()
+    args = ModelArgs(vocab_size=len(tokenizer.get_vocab()))
     
     # 初始化模型（示例代码，实际需要加载checkpoint）
     model = Transformer(args)
     
     # 初始化tokenizer（示例使用BERT中文分词器，实际应与模型匹配）
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
     # tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-    tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
+    # tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
     # load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
-
+    
     if interactive:  # 交互模式
         messages = []  # 保存对话历史
         while True:
